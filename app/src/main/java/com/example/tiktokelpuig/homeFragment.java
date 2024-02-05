@@ -8,13 +8,16 @@ import androidx.navigation.NavController;
 import androidx.navigation.Navigation;
 import androidx.recyclerview.widget.RecyclerView;
 
+import android.util.Log;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import com.bumptech.glide.Glide;
 import com.firebase.ui.firestore.FirestoreRecyclerAdapter;
@@ -30,6 +33,7 @@ import org.jetbrains.annotations.Nullable;
 
 import java.text.SimpleDateFormat;
 import java.util.Calendar;
+import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 
@@ -38,6 +42,8 @@ public class homeFragment extends Fragment {
 
     NavController navController;
     public AppViewModel appViewModel;
+    private Button publishButton;
+    private static final String TAG = "homeFragment";
 
     @Override
     public View onCreateView(LayoutInflater inflater, ViewGroup container,
@@ -50,9 +56,13 @@ public class homeFragment extends Fragment {
     public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
         super.onViewCreated(view, savedInstanceState);
 
+        String currentUserId = FirebaseAuth.getInstance().getCurrentUser().getUid();
+
         navController = Navigation.findNavController(view);
 
         appViewModel = new ViewModelProvider(requireActivity()).get(AppViewModel.class);
+        publishButton = view.findViewById(R.id.publishButton);
+
 
         view.findViewById(R.id.gotoNewPostFragmentButton).setOnClickListener(new View.OnClickListener() {
             @Override
@@ -69,13 +79,22 @@ public class homeFragment extends Fragment {
                 .setLifecycleOwner(this)
                 .build();
 
-        postsRecyclerView.setAdapter(new PostsAdapter(options));
+        postsRecyclerView.setAdapter(new PostsAdapter(options, currentUserId));
         new ViewModelProvider(requireActivity()).get(AppViewModel.class);
+
+
+
     }
 
     class PostsAdapter extends FirestoreRecyclerAdapter<Post, PostsAdapter.PostViewHolder> {
-        public PostsAdapter(@NonNull FirestoreRecyclerOptions<Post> options) {
+        private Post currentPost;
+        CommentsAdapter commentsAdapter;
+        private String currenUserId;
+
+
+        public PostsAdapter(@NonNull FirestoreRecyclerOptions<Post> options, String currenUserId) {
             super(options);
+            this.currenUserId = currenUserId;
         }
 
         @NonNull
@@ -90,6 +109,16 @@ public class homeFragment extends Fragment {
         @Override
         protected void onBindViewHolder(@NonNull PostViewHolder holder, int position,
                                         @NonNull final Post post) {
+
+            Date creationTime = post.creationTime;
+            if (creationTime != null) {
+                SimpleDateFormat sdf = new SimpleDateFormat("HH:mm dd/MM/yyyy", Locale.getDefault());
+                String formattedCreationTime = sdf.format(creationTime);
+                holder.timeTextView.setText(formattedCreationTime);
+            } else {
+                holder.timeTextView.setText("Fecha no disponible");
+            }
+
             // Gestion de likes
             final String postKey = getSnapshots().getSnapshot(position).getId();
             final String uid = FirebaseAuth.getInstance().getCurrentUser().getUid();
@@ -124,46 +153,123 @@ public class homeFragment extends Fragment {
                 holder.mediaImageView.setVisibility(View.GONE);
             }
             //BOTON DE ELIMINAR
-            holder.deleteButton.setOnClickListener(view ->{
-                //obtenemos la posición del elemento en el adptador
-                int adaptadorPosition = holder.getAdapterPosition();
+            holder.deleteButton.setOnClickListener(view -> {
+                // Obtener el ID del documento a eliminar
+                String documentId = getSnapshots().getSnapshot(position).getId();
 
-                //Nos aseguramos de que la posición sea válida
-                if (adaptadorPosition != RecyclerView.NO_POSITION) {
-                    //obtenet el ID del documento a eliminar
-                    String documentId = getSnapshots().getSnapshot(adaptadorPosition).getId();
+                // Obtener el ID del autor del post
+                String postAuthorId = post.getUid();
 
-                    //Eliminamos el documento de Firestore
+                // Verificar si el usuario actual es el autor del post
+                if (currenUserId.equals(postAuthorId)) {
+                    // Eliminar el documento de Firestore
                     FirebaseFirestore.getInstance().collection("posts")
                             .document(documentId)
                             .delete()
                             .addOnSuccessListener(aVoid -> {
-                                //Exito al eliminar
+                                // Éxito al eliminar
                             })
                             .addOnFailureListener(e -> {
-                                //Manejar fallo en la eliminación
+                                // Manejar fallo en la eliminación
                             });
+                } else {
+                    // El usuario actual no es el autor del post, mostrar mensaje o tomar otra acción
+                    // Por ejemplo, puedes mostrar un mensaje Toast o un AlertDialog
+                    Toast.makeText(requireContext(), "No tienes permisos para eliminar este post", Toast.LENGTH_SHORT).show();
                 }
             });
+
             //Para los comentarios
-            holder.bindComments(post.getComments());
-            List<Comment> comments = post.getComments();
-            if (comments != null && !comments.isEmpty()) {
-                holder.commentsRecyclerView.setVisibility(View.VISIBLE);
-                CommentsAdapter commentsAdapter = new CommentsAdapter();
-                commentsAdapter.setComments(comments);
-                holder.commentsRecyclerView.setAdapter(commentsAdapter);
-            }else {
-                holder.commentsRecyclerView.setVisibility(View.GONE);
-            }
+            holder.postCommentButton.setOnClickListener(view -> {
+                String commentContent = holder.commentEditText.getText().toString().trim();
+
+                if (!commentContent.isEmpty()) {
+                    // Crear un nuevo comentario
+                    Comment newComment = new Comment(
+                            FirebaseAuth.getInstance().getCurrentUser().getDisplayName(),
+                            commentContent,
+                            new Date(),
+                            null // Deja que Firestore genere un ID único
+                    );
+
+                    // Verificar si el comentario es válido
+                    if (newCommentIsValid(newComment)) {
+                        // Guardar el comentario en Firestore
+                        holder.commentEditText.setText(""); // Limpiar el campo de texto
+
+                        FirebaseFirestore.getInstance()
+                                .collection("posts")
+                                .document(postKey)
+                                .collection("comments")
+                                .add(newComment)
+                                .addOnSuccessListener(documentReference -> {
+                                    // Éxito al publicar el comentario
+                                    Log.d(TAG, "Comentario publicado con éxito");
+                                    loadCommentsAndNotifyAdapter(holder, post);
+
+                                })
+                                .addOnFailureListener(e -> {
+                                    // Manejar el fallo en la publicación del comentario
+                                    Log.e(TAG, "Error al publicar comentario: " + e.getMessage());
+                                });
+                    } else {
+                        Log.e(TAG, "Error: el comentario no es válido");
+                        // Manejar el caso en el que el comentario no es válido
+                    }
+                }
+            });
+
+            holder.commentsAdapter = new CommentsAdapter();
+            holder.commentsRecyclerView.setAdapter(holder.commentsAdapter);
+
+            loadCommentsAndNotifyAdapter(holder, post);
         }
+
+        private boolean newCommentIsValid(Comment newComment) {
+            // Agrega las verificaciones necesarias aquí
+            // Devuelve true si el comentario es válido, false en caso contrario
+            return newComment != null && newComment.getAuthor() != null && newComment.getContent() != null;
+        }
+
+        private void loadCommentsAndNotifyAdapter(PostViewHolder holder, Post post) {
+            if (post != null && post.getUid() != null) {
+                FirebaseFirestore.getInstance()
+                        .collection("posts")
+                        .document(post.getUid())
+                        .collection("comments")
+                        .get()
+                        .addOnSuccessListener(queryDocumentSnapshots -> {
+                            // Éxito al cargar los comentarios
+                            List<Comment> updatedComments = queryDocumentSnapshots.toObjects(Comment.class);
+                            holder.bindComments(updatedComments);
+
+                            // Notificar al adaptador de comentarios después de cargar los comentarios
+                            holder.commentsAdapter.notifyDataSetChanged();
+                        })
+                        .addOnFailureListener(e -> {
+                            // Manejar el fallo en la publicación
+                            Log.e(TAG, "Error al cargar comentarios: " + e.getMessage());
+                        });
+            } else {
+                Log.e(TAG, "Error: post o su UID es nulo");
+                // Manejar el caso en el que post o su UID es nulo
+            }
+
+        }
+
+
+
+
+
 
         class PostViewHolder extends RecyclerView.ViewHolder {
             ImageView authorPhotoImageView, likeImageView, mediaImageView;
-            TextView authorTextView, contentTextView, numLikesTextView;
-            ImageButton deleteButton;
+            TextView authorTextView, contentTextView, numLikesTextView, timeTextView;
+            ImageButton deleteButton, postCommentButton;
             RecyclerView commentsRecyclerView;
             CommentsAdapter commentsAdapter; //
+            EditText commentEditText;
+
 
             PostViewHolder(@NonNull View itemView) {
                 super(itemView);
@@ -177,16 +283,31 @@ public class homeFragment extends Fragment {
                 commentsRecyclerView = itemView.findViewById(R.id.commentsRecyclerView);
                 commentsAdapter = new CommentsAdapter();
                 commentsRecyclerView.setAdapter(commentsAdapter);
+                postCommentButton = itemView.findViewById(R.id.postCommentButton);
+                commentEditText = itemView.findViewById(R.id.commentEditText);
+                timeTextView = itemView.findViewById(R.id.timeTextView);
+                commentsRecyclerView = itemView.findViewById(R.id.commentsRecyclerView);
+
+
             }
             void bindComments(List<Comment> comments) {
+                if (commentsAdapter == null) {
+                    Log.e(TAG, "Error: commentsAdapter es nulo en bindComments");
+                    return;
+                }
+
                 commentsAdapter.setComments(comments);
 
                 if (comments != null && !comments.isEmpty()) {
                     commentsRecyclerView.setVisibility(View.VISIBLE);
-                }else {
+                } else {
                     commentsRecyclerView.setVisibility(View.GONE);
                 }
+
+                // Notificar al adaptador de comentarios después de establecer los comentarios
+                commentsAdapter.notifyDataSetChanged();
             }
+
         }
     }
 

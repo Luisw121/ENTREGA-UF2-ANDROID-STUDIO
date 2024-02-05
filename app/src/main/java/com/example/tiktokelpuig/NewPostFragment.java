@@ -1,5 +1,7 @@
 package com.example.tiktokelpuig;
 
+import static android.content.ContentValues.TAG;
+
 import android.app.Activity;
 import android.content.Intent;
 import android.net.Uri;
@@ -16,6 +18,7 @@ import androidx.navigation.Navigation;
 import android.os.Environment;
 import android.provider.MediaStore;
 import android.text.TextUtils;
+import android.util.Log;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
@@ -37,6 +40,9 @@ import org.jetbrains.annotations.Nullable;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.Calendar;
+import java.util.Date;
+import java.util.List;
 import java.util.UUID;
 
 
@@ -45,10 +51,11 @@ public class NewPostFragment extends Fragment {
     EditText postConentEditText;
     NavController navController;
     public AppViewModel appViewModel;
-
+    String mediaUrl;
     Uri mediaUri;
-
     String mediaTipo;
+    private CommentsAdapter commentsAdapter;
+
     @Override
     public View onCreateView(LayoutInflater inflater, ViewGroup container,
                              Bundle savedInstanceState) {
@@ -63,6 +70,8 @@ public class NewPostFragment extends Fragment {
 
         publishButton = view.findViewById(R.id.publishButton);
         postConentEditText = view.findViewById(R.id.postContentEditText);
+        commentsAdapter = new CommentsAdapter();
+
 
         publishButton.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -142,12 +151,16 @@ public class NewPostFragment extends Fragment {
     }
 
     private void publicar() {
+        FirebaseUser user = FirebaseAuth.getInstance().getCurrentUser();
+
         String postContent = postConentEditText.getText().toString();
-        if(TextUtils.isEmpty(postContent)){
+        if (TextUtils.isEmpty(postContent)) {
             postConentEditText.setError("Required");
             return;
         }
+
         publishButton.setEnabled(false);
+
         if (mediaTipo == null) {
             guardarEnFirestore(postContent, null);
         }
@@ -155,29 +168,108 @@ public class NewPostFragment extends Fragment {
         {
             pujaIguardarEnFirestore(postContent);
         }
+
+        // Verificar si hay un usuario autenticado
+        if (user != null && user.isEmailVerified()) {
+            Date currentCreationTime = Calendar.getInstance().getTime();
+
+            // Crea una nueva instancia de Post con la información y el creationTime
+            Post newPost = new Post(
+                    user.getUid(),
+                    user.getDisplayName(),
+                    (user.getPhotoUrl() != null ? user.getPhotoUrl().toString() : "R.drawable.user"),
+                    postContent,
+                    mediaUrl,  // Asegúrate de tener mediaUrl definido antes de usarlo aquí
+                    mediaTipo,
+                    currentCreationTime);
+
+            // Guardar newPost en Firestore
+            FirebaseFirestore.getInstance().collection("posts")
+                    .add(newPost)
+                    .addOnSuccessListener(documentReference -> {
+                        // Éxito al publicar
+                        navController.navigate(R.id.homeFragment);
+                        appViewModel.setMediaSeleccionado(null, null);
+                    })
+                    .addOnFailureListener(e -> {
+                        // Manejar el fallo en la publicación
+                        publishButton.setEnabled(true); // Vuelve a habilitar el botón en caso de fallo
+                    });
+        } else {
+            // Manejar el caso en el que el usuario no está autenticado
+            publishButton.setEnabled(true);
+            // Vuelve a habilitar el botón si no hay usuario autenticado
+        }
     }
+
     private void guardarEnFirestore(String postContent, String mediaUrl) {
         FirebaseUser user = FirebaseAuth.getInstance().getCurrentUser();
-        Post post = new Post(user.getUid(), user.getDisplayName(),
-                (user.getPhotoUrl() != null ? user.getPhotoUrl().toString() :
-                        "R.drawable.user"), postContent, mediaUrl, mediaTipo);
+        Post post = new Post(
+                user.getUid(),
+                user.getDisplayName(),
+                (user.getPhotoUrl() != null ? user.getPhotoUrl().toString() : "R.drawable.user"),
+                postContent,
+                mediaUrl,
+                mediaTipo
+        );
         FirebaseFirestore.getInstance().collection("posts")
                 .add(post)
-                .addOnSuccessListener(new OnSuccessListener<DocumentReference>() {
-                    @Override
-                    public void onSuccess(DocumentReference documentReference) {
-                        navController.popBackStack();
-                        appViewModel.setMediaSeleccionado( null, null);
-                    }
+                .addOnSuccessListener(documentReference -> {
+                    navController.popBackStack();
+                    appViewModel.setMediaSeleccionado(null, null);
                 });
     }
+
     private void pujaIguardarEnFirestore(final String postText) {
         FirebaseStorage.getInstance().getReference(mediaTipo + "/" +
                         UUID.randomUUID())
                 .putFile(mediaUri)
                 .continueWithTask(task ->
                         task.getResult().getStorage().getDownloadUrl())
-                .addOnSuccessListener(url -> guardarEnFirestore(postText,
-                        url.toString()));
+                .addOnSuccessListener(url -> {
+                    // Asignar el valor de la URL después de cargar el archivo
+                    mediaUrl = url.toString();
+                    guardarEnFirestore(postText, mediaUrl);
+                });
     }
+    private void publicarComentario(String postKey, Comment newComment) {
+        // Guardar el comentario en Firestore
+        FirebaseFirestore.getInstance()
+                .collection("posts")
+                .document(postKey)
+                .collection("comments")
+                .add(newComment)
+                .addOnSuccessListener(documentReference -> {
+                    // Éxito al publicar el comentario
+                    Log.d(TAG, "Comentario publicado con éxito");
+                    cargarYNotificarComentarios(postKey);
+                })
+                .addOnFailureListener(e -> {
+                    // Manejar el fallo en la publicación del comentario
+                    Log.e(TAG, "Error al publicar comentario: " + e.getMessage());
+                });
+    }
+
+    private void cargarYNotificarComentarios(String postKey) {
+        FirebaseFirestore.getInstance()
+                .collection("posts")
+                .document(postKey)
+                .collection("comments")
+                .get()
+                .addOnSuccessListener(queryDocumentSnapshots -> {
+                    // Éxito al cargar los comentarios
+                    List<Comment> updatedComments = queryDocumentSnapshots.toObjects(Comment.class);
+
+                    // Actualizar tu adaptador con los comentarios cargados
+                    commentsAdapter.setComments(updatedComments);
+
+                    // Notificar cambios al adaptador
+                    commentsAdapter.notifyDataSetChanged();
+                })
+                .addOnFailureListener(e -> {
+                    // Manejar el fallo en la carga de comentarios
+                    Log.e(TAG, "Error al cargar comentarios: " + e.getMessage());
+                });
+    }
+
 }
